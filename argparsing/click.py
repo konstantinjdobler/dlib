@@ -4,7 +4,7 @@ from typing import Any, List, Union
 
 from click.core import Context, Option
 
-from misc.ddict import ddict
+from ..misc.ddict import ddict
 
 
 class UnlimitedNargsOption(Option):

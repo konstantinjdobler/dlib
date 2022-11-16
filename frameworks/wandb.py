@@ -11,7 +11,7 @@ from pytorch_lightning import Callback
 from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.utilities.distributed import rank_zero_only
 
-from frameworks.pytorch import get_rank
+from ..frameworks.pytorch import get_rank
 
 WANDB_PROJECT = ""
 WANDB_ENTITY = ""
