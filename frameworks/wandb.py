@@ -13,19 +13,17 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 
 from ..frameworks.pytorch import get_rank
 
-WANDB_PROJECT = ""
-WANDB_ENTITY = ""
+WANDB_PROJECT = "<your project>"
+WANDB_ENTITY = "<your entity>"
 
-if WANDB_ENTITY == "" or WANDB_PROJECT == "":
-    raise Exception(
+if WANDB_ENTITY == "<your entity>" or WANDB_PROJECT == "<your project>":
+    logger.warning(
         "dLib error: You need to specify WANDB_ENTITY and WANDB_PROJECT in dlib/frameworks/wandb.py when using the wandb module."
     )
 
 
 class MyWandbLogger(WandbLogger):
-    def _scan_and_log_checkpoints(
-        self, checkpoint_callback: "ReferenceType[ModelCheckpoint]"
-    ) -> None:
+    def _scan_and_log_checkpoints(self, checkpoint_callback) -> None:
         # get checkpoints to be saved with associated score
         checkpoints = {
             checkpoint_callback.last_model_path: checkpoint_callback.current_score,
