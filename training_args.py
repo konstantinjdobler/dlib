@@ -11,11 +11,9 @@ class TrainingArgs:
     Argument class for use with simple_parsing that handles the basics of most LLM training scripts. Subclass this to add more arguments.
     """
 
-    # Required.
     data_dir: Path = field(alias="-d")
     run_name: str = field(aliase="-n")  # Run name for logging
 
-    # Training basics
     base_unit: Literal["samples", "tokens", "optimizer-steps", "iters"] = field(default="iters")
     "Unit of all training constants. They will be converted to optimizer_steps and iters in __post_init__."
 
@@ -41,18 +39,15 @@ class TrainingArgs:
     seed: int = field(default=42)
     only_val: bool = field(default=False)
 
-    # Data & Checkpoints
     pretrained_checkpoint_dir: Path = field(default="checkpoints/meta-llama/Llama-2-7b-hf")
     resume: bool = False
     out_dir: Path = field(default="out/")
 
-    # More Hyperparameters
     learning_rate: float = field(default=3e-4)
     batch_size: int = field(default=128, alias="-b")
     block_size: int | None = field(default=None)
     "If None, load from model config."
 
-    # assert gradient_accumulation_steps > 0
     weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
@@ -62,7 +57,6 @@ class TrainingArgs:
     decay_lr: bool = True
     min_lr: float = 6e-5
 
-    # W&B logging & debugging
     wandb_tags: list[str] = list_field(default=[], alias="-t")
     "Tags for wandb."
 
@@ -72,7 +66,6 @@ class TrainingArgs:
     debug: bool = field(default=False)
     "If true, wait for debugger to attach at the start of the script."
 
-    # Hardware acceleration & precision
     devices: int = field(default=1)
     tpu: bool = False
     precision: Literal["32-true", "16-true", "bf16-true", "16-mixed", "bf16-mixed"] = "bf16-true"
@@ -94,7 +87,6 @@ class TrainingArgs:
     fsdp_cpu_offload: bool = field(default=False)
     smart_cuda_alloc: bool = field(default=False)
 
-    # Data args
     workers: int = field(default=4, alias="-w")
     preprocessing_workers: int = field(default=4, alias="--pw")
     data_preprocessing_only: bool = field(default=False)
