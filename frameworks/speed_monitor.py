@@ -3,18 +3,14 @@ Adapted from lit-gpt by Konstantin Dobler.
 """
 
 
-import time
 from collections import deque
 from contextlib import nullcontext
 from typing import Any, Callable, Deque, Dict, Optional
 
 import torch
-from lightning import Callback, Fabric, LightningModule, Trainer
+from lightning import Fabric
 from lightning.fabric.accelerators.xla import _XLA_GREATER_EQUAL_2_1
 from lightning.fabric.utilities.rank_zero import rank_zero_only as fabric_rank_zero_only
-from lightning.pytorch.utilities.rank_zero import (
-    rank_zero_only as trainer_rank_zero_only,
-)
 from torch import nn
 from torch.utils.flop_counter import FlopCounterMode
 
@@ -208,9 +204,9 @@ class SpeedMonitor:
         train_time: float,  # elapsed training time (seconds), just the actual iter
         train_time_e2e: float | None = None,  # elapsed training time (seconds) including everything
         model_flops_fwd_bwd: Optional[int] = None,  # (per device)
-        tokens: Optional[int] = None,  # total length of the samples seen (per device)
-        compute: bool = True,
-        step_kwargs: dict = {},
+        tokens: Optional[int] = None,  # tokens seen this batch (per device)
+        compute: bool = True,  # whether to compute & log metrics or only update the running counts
+        step_kwargs: dict = {},  # additional kwargs to pass to log_dict, e.g. optimizer_step
     ):
         self.step += 1
         model_flops_fwd_bwd = model_flops_fwd_bwd or self.model_flops_fwd_bwd
@@ -236,7 +232,6 @@ class SpeedMonitor:
             elapsed_batches = len(self.history_samples)
             elapsed_samples = sum(self.history_samples)
             elapsed_time = sum(self.history_times)
-            # samples_per_sec = elapsed_samples * world_size / elapsed_time
             samples_per_sec = elapsed_samples / elapsed_time
             batches_per_sec = elapsed_batches / elapsed_time
             metrics.update(
@@ -330,84 +325,13 @@ class SpeedMonitorFabric(SpeedMonitor):
         super().on_train_batch_end(*args, **kwargs)
 
 
-class SpeedMonitorCallback(Callback):
-    def __init__(self, length_fn: Callable[[Any], int], batch_size: int, **kwargs: Any) -> None:
-        super().__init__()
-        self.speed_monitor: Optional[SpeedMonitor] = None
-        self.speed_monitor_kwargs = kwargs
-        self.length_fn = length_fn
-        self.batch_size = batch_size
-        self.eval_t0: int = 0
-        self.train_t0: int = 0
-        self.total_lengths: int = 0
-
-    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
-        if self.speed_monitor is not None:
-            return  # already setup
-        # TODO: this will not work properly if a precision plugin is passed to Trainer
-        flops_available = get_flops_available(trainer.strategy.root_device, trainer._accelerator_connector._precision_flag)
-        self.speed_monitor = SpeedMonitor(flops_available, trainer.logger.log_metrics, **self.speed_monitor_kwargs)
-
-    @trainer_rank_zero_only
-    def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        if trainer.fit_loop._should_accumulate():
-            return
-
-        self.train_t0 = time.perf_counter()
-
-    @trainer_rank_zero_only
-    def on_train_batch_end(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        outputs: Any,
-        batch: Any,
-        batch_idx: int,
-    ) -> None:
-        self.total_lengths += self.length_fn(batch)
-        if trainer.fit_loop._should_accumulate():
-            return
-        train_elapsed = time.perf_counter() - self.train_t0
-        assert self.speed_monitor is not None
-        iter_num = trainer.fit_loop.total_batch_idx
-        assert (measured_flops := pl_module.measured_flops) is not None
-        self.speed_monitor.on_train_batch_end(
-            (iter_num + 1) * self.batch_size,
-            train_elapsed,
-            # this assumes that device FLOPs are the same and that all devices have the same batch size
-            trainer.world_size,
-            model_flops_fwd_bwd=measured_flops,
-            tokens=self.total_lengths,
-        )
-
-    @trainer_rank_zero_only
-    def on_validation_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        self.eval_t0 = time.perf_counter()
-
-    @trainer_rank_zero_only
-    def on_validation_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        eval_elapsed = time.perf_counter() - self.eval_t0
-        assert self.speed_monitor is not None
-        self.speed_monitor.eval_end(eval_elapsed)
-
-
-
 ######################################
 #### FLOPS estimation / measuring ####
 ######################################
 
 
-def flops_per_param(max_seq_length: int, num_layers: int, hidden_size: int, num_params: int) -> int:
-    flops_per_token = 2 * num_params  # each parameter is used for a MAC (2 FLOPS) per network operation
-    # this assumes that all samples have a fixed length equal to the block size
-    # which is most likely false during finetuning
-    flops_per_seq = flops_per_token * max_seq_length
-    attn_flops_per_seq = num_layers * 2 * 2 * (hidden_size * (max_seq_length**2))
-    return flops_per_seq + attn_flops_per_seq
-
-
 def estimate_flops(model: nn.Module, block_size: int, num_layers: int, hidden_size: int) -> int:
-    """Measures estimated FLOPs for MFU.
+    """Measures estimated FLOPs for MFU, for Transformer models.
 
     Refs:
         * https://ar5iv.labs.arxiv.org/html/2205.05198#A1
@@ -426,6 +350,15 @@ def estimate_flops(model: nn.Module, block_size: int, num_layers: int, hidden_si
     # forward + backward
     frozen_ops_per_step = 2 if model.training else 1
     return ops_per_step * trainable_flops + frozen_ops_per_step * frozen_flops
+
+
+def flops_per_param(max_seq_length: int, num_layers: int, hidden_size: int, num_params: int) -> int:
+    flops_per_token = 2 * num_params  # each parameter is used for a MAC (2 FLOPS) per network operation
+    # this assumes that all samples have a fixed length equal to the block size
+    # which is most likely false during finetuning
+    flops_per_seq = flops_per_token * max_seq_length
+    attn_flops_per_seq = num_layers * 2 * 2 * (hidden_size * (max_seq_length**2))
+    return flops_per_seq + attn_flops_per_seq
 
 
 def measure_flops(model: nn.Module, x: torch.Tensor) -> int:
@@ -453,7 +386,7 @@ def measure_model_flops(
     We use either the original model or a parameter_lookup dict to exactly reconstruct the model (shapes, requires_grad).
     Using the parameter lookup instead of the original model can be helpful when the original model has been modified a lot since it's instantiation (e.g. FSDP, activation checkpointing, manual edits).
 
-    Added by Konstantin Dobler, adapted from lit-gpt.
+    Adapted from lit-gpt.
     """
 
     if parameter_lookup is None and model is None:

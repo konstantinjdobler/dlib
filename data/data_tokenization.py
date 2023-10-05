@@ -146,7 +146,7 @@ def tokenize_data(args: TokenizationArgs) -> None:
             desc="tokenizing the splits",
             batched=True,
             batch_size=2**10,
-            num_proc=args.num_proc,  # if "checkpoints/" in str(tokenizer_path) else 1,  # Should use only one process to leverage tokenizers parallelism
+            num_proc=args.num_proc,
             remove_columns=["text"],
         )
 
@@ -162,10 +162,9 @@ def tokenize_data(args: TokenizationArgs) -> None:
         dset_splits.append((f"val-clipped-{args.extra_val_clip_length}", clipped_tokenized_val))
     for split, dset in dset_splits:
         arr_len = np.sum(dset["len"], dtype=np.uint64)
-        # filename = destination_path / f"{split}.bin"
 
         bin_path, idx_path = get_cache_paths(args.source_dir, args.tokenizer_path, split)
-        DATA_DTYPE = np.uint16  # (can do since enc.max_token_value == 50256 is < 2**16 == 65536)
+        DATA_DTYPE = np.uint16  # vocab size of e.g. 50256 is < 2**16 == 65536)
         if len(tokenizer) > 65536:
             print("Info: using uint32 for token ids since vocab size > 65536")
             DATA_DTYPE = np.uint32
@@ -190,7 +189,7 @@ def tokenize_data(args: TokenizationArgs) -> None:
             batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format("numpy")
             flattend_batch_tokens = np.concatenate(batch["ids"])
 
-            # safv offsets of doc start indices to use later on
+            # safe offsets of doc start indices to use later on
             # first_len = batch["len"][0]
             # calculate relative start index of each sample to the batch start index
             offsets_to_prev = np.concatenate(([0], batch["len"][:-1]))

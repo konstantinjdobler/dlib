@@ -17,7 +17,6 @@ def load_datasets(
     use_clipped_val: bool = False,
 ):
 
-    # open data_dir / metadata.json
     with open(data_dir / "metadata.json", "r") as f:
         metadata = json.load(f)
 
@@ -64,7 +63,7 @@ def load_datasets(
         block_size=block_size,
         data_dtype=np.dtype(metadata["data_dtype"]),
         doc_offset_dtype=np.dtype(metadata["doc_offset_dtype"]),
-        output_dtype=np.int64,  # for safety
+        output_dtype=np.int64,  # expected by torch (int64 => long)
         bos_token=metadata["bos_token_id"],
         eos_token=metadata["eos_token_id"],
         mask_bos_loss=True,
@@ -82,7 +81,6 @@ def load_datasets(
         doc_offsets_file=val_idx_path,
         shuffle=False,
         full_samples=use_clipped_val,
-        # no_document_packing=True,
         **common_kwargs,
     )
     return train_data, val_data
@@ -115,7 +113,7 @@ def get_dataloaders(
     )
     val_dataloader = DataLoader(
         val_data,
-        batch_size=val_batch_size or batch_size,  # use batch_size=1 for fitting reaaaaaly big eval samples in whole
+        batch_size=val_batch_size or batch_size,
         num_workers=workers,
         pin_memory=True,
         # https://discuss.pytorch.org/t/what-are-the-dis-advantages-of-persistent-workers/102110/10
@@ -129,8 +127,6 @@ def get_dataloaders(
 
 class VeryCoolDataset(TorchDataset):
     """
-    *adapted heavily from pretrain/openwebtext.py*
-
     In `data_tokenization.py` we store the tokenized concatenated data (`data_file`) AND a file containing the indices in `data_file` where a new sample starts.
     We use this `index_file` to sample from the data so that the beginning of each sample aligns with the start of an actual sample in the data.
 
@@ -138,6 +134,8 @@ class VeryCoolDataset(TorchDataset):
     However, we discard the remainder of each sample after the first `block_size` tokens.
 
     Expected format of each sample is a EOS token after each doc.
+
+    *adapted heavily from lit-gpt pretrain/openwebtext.py*
     """
 
     def __init__(
@@ -231,7 +229,6 @@ class VeryCoolDataset(TorchDataset):
         return x, y
 
     def __getitem__(self, sample_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        # sample_idx = torch.randint(len(self.indices) - 20, (1,), generator=self.rng).item()
         if self.training_order is not None:
             sample_idx = self.training_order[sample_idx].item()
 

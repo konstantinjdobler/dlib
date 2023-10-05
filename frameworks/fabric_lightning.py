@@ -30,26 +30,16 @@ def fabric_main_process_first(
         local_rank = fabric.local_rank
         try:
             if local_rank > 0:
-                print(
-                    f"Process {local_rank} | {description} | Waiting for main process..."
-                )
+                print(f"Process {local_rank} | {description} | Waiting for main process...")
                 fabric.barrier()
             yield
         finally:
             if local_rank == 0:
-                print(
-                    f"Main process | {description} | Done. Executing on parallel processes now..."
-                )
+                print(f"Main process | {description} | Done. Executing on parallel processes now...")
                 fabric.barrier()
                 if time_buffer_after_main:
-                    time_buffer_after_main = (
-                        time_buffer_after_main
-                        if isinstance(time_buffer_after_main, int)
-                        else 5
-                    )
-                    sleep(
-                        time_buffer_after_main
-                    )  # Give other processes time to catch up
+                    time_buffer_after_main = time_buffer_after_main if isinstance(time_buffer_after_main, int) else 5
+                    sleep(time_buffer_after_main)  # Give other processes time to catch up
     else:
         yield
 
@@ -104,9 +94,7 @@ def save_checkpoint(
 
 
 class WandbCleanupDiskAndCloudSpaceCallback(Callback):
-    def __init__(
-        self, cleanup_local=True, cleanup_online=True, size_limit=0, backoff=10
-    ) -> None:
+    def __init__(self, cleanup_local=True, cleanup_online=True, size_limit=0, backoff=10) -> None:
         super().__init__()
         self.cleanup_local = cleanup_local
         self.cleanup_online = cleanup_online
@@ -115,9 +103,7 @@ class WandbCleanupDiskAndCloudSpaceCallback(Callback):
         self.counter = 0
 
     @rank_zero_only
-    def on_validation_end(
-        self, trainer: L.Trainer, pl_module: L.LightningModule
-    ) -> None:
+    def on_validation_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         if self.counter < self.backoff:
             self.counter += 1
             return
@@ -132,9 +118,7 @@ class WandbCleanupDiskAndCloudSpaceCallback(Callback):
                 for artifact in run.logged_artifacts():
                     aliases = [x["alias"] for x in artifact._attrs["aliases"]]
                     if "best" not in aliases and "keep" not in aliases:
-                        cli_logger.info(
-                            f"Deleting outdated artifact with aliases {aliases}"
-                        )
+                        cli_logger.info(f"Deleting outdated artifact with aliases {aliases}")
                         artifact.delete()
             else:
                 cli_logger.error("wandb run has no logged artifacts")

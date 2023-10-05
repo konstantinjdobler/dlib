@@ -30,9 +30,7 @@ def histogram(xs, bins):
     return counts, boundaries
 
 
-def work_then_gather_then_process_on_rank0(
-    tensor, work_func, rank0_func, fabric: L.Fabric
-):
+def work_then_gather_then_process_on_rank0(tensor, work_func, rank0_func, fabric: L.Fabric):
     tensor_is_sharded_elsewhere = tensor is None or tensor.numel() == 0
     result = None
     if not tensor_is_sharded_elsewhere:
@@ -95,11 +93,7 @@ def create_log_tensor_histogram_funcs(name: str, prefix: str):
     def rank0_func(r):
         counts, bins = r
         wandb.run._log(
-            {
-                f"{prefix}/{name}": wandb.Histogram(
-                    np_histogram=(counts.tolist(), bins.tolist())
-                )
-            },
+            {f"{prefix}/{name}": wandb.Histogram(np_histogram=(counts.tolist(), bins.tolist()))},
             commit=False,
         )
 
@@ -118,15 +112,11 @@ def log_param_stats(
     grad = param.grad
 
     if log_weights:
-        work_func, rank0_func = create_log_tensor_histogram_funcs(
-            name, prefix="parameters"
-        )
+        work_func, rank0_func = create_log_tensor_histogram_funcs(name, prefix="parameters")
         work_then_gather_then_process_on_rank0(weight, work_func, rank0_func, fabric)
 
     if log_grads:
-        work_func, rank0_func = create_log_tensor_histogram_funcs(
-            name, prefix="gradients"
-        )
+        work_func, rank0_func = create_log_tensor_histogram_funcs(name, prefix="gradients")
         work_then_gather_then_process_on_rank0(grad, work_func, rank0_func, fabric)
 
     if check_bf16_underflow:
@@ -153,9 +143,7 @@ def log_model_stats_to_wandb(
     """
 
     grad_tracking_t0 = time.perf_counter()
-    for n, p in tqdm(
-        model.named_parameters(), desc="Logging model states", leave=False
-    ):
+    for n, p in tqdm(model.named_parameters(), desc="Logging model states", leave=False):
         if p.requires_grad:
             log_param_stats(
                 fabric,
