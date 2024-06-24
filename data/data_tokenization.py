@@ -1,5 +1,5 @@
 """
-"Smart" datasset tokenization to be used in conjunction with `VeryCoolDataset` in `dataset.py`.
+"Smart" dataset tokenization to be used in conjunction with `VeryCoolDataset` in `dataset.py`.
 We tokenize each document and concatenate the token ids into one large np.memmap file, optionally adding BOS and EOS tokens.
 We also store the start indices of each document in the concatenated file in a separate file.
 That way, have O(1) access to each document and can retrieve samples with arbitrary sequence length without re-tokenization.
@@ -51,7 +51,9 @@ class TokenizationArgs:
     num_proc: int = -1
     conserve_disk_space: bool = field(default=False)
     prepend_bos: bool = field(default=False)
-    append_eos: bool = field(default=True)
+    """We do it in the Dataset class on-demand, but we can also do it here."""
+    append_eos: bool = field(default=False)
+    """We do it in the Dataset class on-demand, but we can also do it here."""
 
     extra_val_clip_length: int | None = field(default=None)
     """If you want to compare PPL between models that use different tokenizers, 
@@ -106,9 +108,6 @@ def tokenize_data(args: TokenizationArgs) -> None:
             padding=False,
             truncation=False,
             add_special_tokens=False,
-            # We use return_special_tokens_mask=True because DataCollatorForLanguageModeling is more efficient when it
-            # receives the `special_tokens_mask`.
-            # return_special_tokens_mask=True,
             return_attention_mask=False,
         )["input_ids"]
 
@@ -131,12 +130,9 @@ def tokenize_data(args: TokenizationArgs) -> None:
             padding=False,
             truncation=False,
             add_special_tokens=False,
-            # We use return_special_tokens_mask=True because DataCollatorForLanguageModeling is more efficient when it
-            # receives the `special_tokens_mask`.
-            # return_special_tokens_mask=True,
             return_attention_mask=False,
         )["input_ids"]
-        print(ids, len(ids), ids[0])
+        # print(ids, len(ids), ids[0])
         return {"ids": ids, "len": len(ids)}
 
     if not args.just_clip_val:
@@ -173,7 +169,7 @@ def tokenize_data(args: TokenizationArgs) -> None:
 
         num_docs = len(dset)
         print("num docs", num_docs)
-        # NOTE: uint64 can accomodate ca. 2**64=1.8e19 tokens, which is more than enough for our purposes
+        # NOTE: uint64 can accomodate 2**64 = ~1.8e19 tokens, which is more than enough for our purposes
         OFFSET_DTYPE = np.uint64
         doc_offsets = np.memmap(
             str(idx_path),
@@ -189,7 +185,7 @@ def tokenize_data(args: TokenizationArgs) -> None:
             batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format("numpy")
             flattend_batch_tokens = np.concatenate(batch["ids"])
 
-            # safe offsets of doc start indices to use later on
+            # save offsets of doc start indices to use later on
             # first_len = batch["len"][0]
             # calculate relative start index of each sample to the batch start index
             offsets_to_prev = np.concatenate(([0], batch["len"][:-1]))

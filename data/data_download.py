@@ -6,7 +6,7 @@ python preprocess_data.py --lg de --dataset cc100 --out_dir ./data/cc100/ --proc
 
 
 Example command to download cc100 for German using streaming mode for HF datasets (faster, requires less RAM) and cleaning up caches:
-python preprocess_data.py --lg de --dataset cc100 --out_dir ./data/cc100/ --processes 8 --stream --stream_shuffle_buffer_size 1_000_000 --conserve_disk_space
+python preprocess_data.py --lg de --dataset cc100 --out_dir ./data/cc100/ --processes 8 --stream --stream_shuffle_buffer_size 10_000 --conserve_disk_space
 
 Inspiration from lit-gpt and gpt-neox.
 """
@@ -34,7 +34,7 @@ class Args:
 
     out_dir: str = field(alias="-o")
 
-    dataset: Literal["mc4", "cc100", "oscar2023", "pile"] = field(default="oscar2023")
+    dataset: Literal["mc4", "cc100", "oscar2023", "pile", "culturax", "pubmed-abstracts"] = field(default="oscar2023")
     "HF dataset. Pile currently uses a mirror with copyrighted material removed."
 
     max_train_size: int = field(default=50_000_000)
@@ -69,7 +69,7 @@ class Args:
     Not needed if you use --stream."""
 
     format: Literal["txt", "jsonl"] = field(default="jsonl")
-    "Format to write to disk. Prefer jsonl over txt for better handling of newlines in documents and because it can be laoded much faster by HF datasets."
+    "Format to write to disk. Prefer jsonl over txt for better handling of newlines in documents and because it can be loaded much faster by HF datasets."
 
 
 @graceful_exceptions()
@@ -121,7 +121,7 @@ def main(args: Args):
             split=args.split,
             cache_dir=tmp_cache_dir,
             streaming=args.stream,
-            use_auth_token=True,
+            token=True,
             num_proc=None if args.stream else args.processes,
         )
         print(dataset)
@@ -143,6 +143,16 @@ def main(args: Args):
             ),
         )
         print(dataset)
+    elif args.dataset == "culturax":
+        dataset = load_dataset(
+            "uonlp/CulturaX",
+            args.language,
+            split=args.split,
+            cache_dir=tmp_cache_dir,
+            streaming=args.stream,
+            num_proc=None if args.stream else args.processes,
+        )
+        print(dataset)
     elif args.dataset == "pile":
         dataset = load_dataset(
             "monology/pile-uncopyrighted",
@@ -152,6 +162,18 @@ def main(args: Args):
             num_proc=None if args.stream else args.processes,
         )
         print(dataset)
+    elif args.dataset == "pubmed-abstracts":
+        dataset = load_dataset(
+            "ncbi/pubmed",
+            split="train",
+            cache_dir=tmp_cache_dir,
+            streaming=args.stream,
+            num_proc=None if args.stream else args.processes,
+        )
+        dataset = dataset.map(
+            lambda x: {"text": x["MedlineCitation"]["Article"]["Abstract"]["AbstractText"]},
+            remove_columns=dataset.column_names,
+        )
 
     ##### For CC100: Group individual lines into documents #####
     if args.dataset == "cc100":
@@ -196,12 +218,14 @@ def main(args: Args):
     ##### Process dataset #####
     if args.stream:
         # dataset.columns_names is not available for streaming datasets #TODO: this is fixed in the current master version of datasets
-        cols = ["text"]
-        if args.dataset == "mc4":
-            cols.extend(["timestamp", "url"])
-        if args.dataset == "pile":
-            cols.append("meta")
-        dataset = dataset.map(f, batch_size=16_000, batched=True, remove_columns=cols)
+        # cols = ["text"]
+        # if args.dataset == "mc4":
+        #     cols.extend(["timestamp", "url"])
+        # if args.dataset == "pile":
+        #     cols.append("meta")
+        # if args.dataset == "culturax":
+        #     cols.extend(["timestamp", "url", "source"])
+        dataset = dataset.map(f, batch_size=16_000, batched=True, remove_columns=dataset.column_names)
     else:
         logger.info("Starting mapping & chunking")
         dataset = dataset.map(

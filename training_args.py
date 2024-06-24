@@ -15,7 +15,7 @@ class TrainingArgs:
 
     data_dir: Path = field(alias="-d")
 
-    model_path: str = field(alias="--model")
+    model_path: Path = field(default="meta-llama/Llama-2-7b-hf", alias="--model")
     "Model identifier. This is used to construct the model architecture and load pretrained weights if not specified otherwise."
 
     from_scratch: bool = field(default=False)
@@ -32,7 +32,7 @@ class TrainingArgs:
     val_file: str = field(default="val.txt")
     "Name of the validation file."
 
-    tokenizer_path: str | None = field(default=None)
+    tokenizer_path: Path | None = field(default=None)
     "Path to a saved tokenizer to switch the vocabulary. If None, use the model_path."
 
     ###############################
@@ -55,11 +55,16 @@ class TrainingArgs:
     log_interval: float = field(default=-1)
     "Interval between log prints. If < 1, use as percentage of training_goal. If -1, print log after every batch."
 
+    model_profiling_interval: float = field(default=8)
+    "Interval between model profilings."
+
     warmup_period: float = field(default=0.005)
     "Length of lr warmup. If < 1, use as percentage of training_goal."
 
     lr_decay_period: int = field(default=-1)
     "If -1, decay until end of training."
+
+    lr_final_annealing_period: int = field(default=None)
 
     ###########################
     ##### Hyperparameters #####
@@ -67,7 +72,7 @@ class TrainingArgs:
     block_size: int = field(default=512)
     "The sequence length of samples."
 
-    learning_rate: float = field(default=3e-4)
+    max_lr: float = field(default=3e-4)
     batch_size: int = field(default=128, alias="-b")
     weight_decay: float = 0.1
     beta1: float = 0.9
@@ -75,8 +80,9 @@ class TrainingArgs:
     grad_clip: float = field(default=1.0)
     "If -1, disable."
 
-    decay_lr: bool = True
     min_lr: float = 6e-5
+    infinite_lr: float = -1
+    """If not -1, use an infinite learning rate scheduler with this learning rate for the ``infinite'' part."""
 
     #######################################
     ## Hardware acceleration & precision ##
@@ -93,6 +99,10 @@ class TrainingArgs:
         aliases="--ds",
     )
 
+    use_fsdp: bool = field(default=True)
+    fsdp_sharding_strategy: Literal["FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD"] = field(default="SHARD_GRAD_OP")
+    fsdp_limit_all_gathers: bool = field(default=True)
+
     micro_batch_size: int = field(default=None, alias="--mb")
     """If None, use batch_size // num_devices. This is the batch size per device, not the total batch size.
     You should tune this so that you do not get GPU RAM OOM errors. We automatically calculate the gradient accumulation steps to achieve your desired `batch_size`."""
@@ -102,17 +112,21 @@ class TrainingArgs:
 
     gradient_accumulation_steps: int = field(default=-1)
     "If -1, set automatically based on batch_size and micro_batch_size."
+    gradient_accumulation_no_sync: bool = field(default=True)
 
     precision: Literal["32-true", "16-mixed", "bf16-mixed", "bf16-true", "16-true"] = "bf16-true"
+    use_anyprecision_adamw: bool = field(default=False)
+    use_paged_adamw: bool = field(default=False)
+    adamw_foreach: bool = field(default=False)
     compile: bool = field(default=False)
     "torch.compile model for faster training."
 
-    workers: int = field(default=4, alias="-w")
-    preprocessing_workers: int = field(default=4, aliases="--pw")
-    "Number of workers for preprocessing the datasets. If -1, use all available CPUs."
+    use_additional_flash_attn_kernels: bool = field(default=False)
 
-    data_preprocessing_only: bool = field(default=False)
-    conserve_disk_space: bool = field(default=False)
+    workers: int = field(default=4, alias="-w")
+
+    preprocessing_workers: int = field(default=-1, aliases="--pw")
+    "Number of workers for preprocessing the datasets. If -1, use all available CPUs."
 
     ############################
     ###### Logging & Misc ######
@@ -140,6 +154,9 @@ class TrainingArgs:
     debug: bool = field(default=False)
     "If true, wait for debugger to attach at the start of the script."
 
+    model_profiling: bool = field(default=True)
+    "If true, log model profiling information to wandb (param & grad stats)."
+
     force_deterministic: bool = field(default=False)
     "Force PyTorch operations to be deterministic. Could be slower."
 
@@ -147,25 +164,18 @@ class TrainingArgs:
     "Do fast run through training and validation with reduced sizes."
 
     def __post_init__(self):
+        if self.num_devices == -1:
+            import torch
+
+            self.num_devices = torch.cuda.device_count()
+            print(f"num_devices -1: set to {self.num_devices} based on `torch.cuda.device_count()`")
+
         if self.micro_batch_size is None:
             # NOTE: you need to make sure that micro_batch_size can fit into the GPU memory
             self.micro_batch_size = self.batch_size // self.num_devices
             assert self.batch_size % self.num_devices == 0
 
         self.iter_batch_size = self.micro_batch_size * self.num_devices
-
-        if self.eval_interval < 1:
-            self.eval_interval = int(self.eval_interval * self.training_goal)
-        if self.save_interval < 1:
-            self.save_interval = int(self.save_interval * self.training_goal)
-        if self.log_interval < 1 and self.log_interval != -1:
-            self.log_interval = int(self.log_interval * self.training_goal)
-        if self.warmup_period < 1:
-            self.warmup_period = int(self.warmup_period * self.training_goal)
-        if self.lr_decay_period == -1:
-            self.lr_decay_period = self.training_goal
-        elif self.lr_decay_period < 1:
-            self.lr_decay_period = int(self.lr_decay_period * self.training_goal)
 
         assert self.batch_size % self.micro_batch_size == 0
         if self.gradient_accumulation_steps == -1:
@@ -193,6 +203,23 @@ class TrainingArgs:
         else:
             raise ValueError(f"Unknown training goal unit: {self.base_unit}")
 
+        if self.eval_interval < 1:
+            self.eval_interval = int(self.eval_interval * self.training_goal)
+        if self.save_interval < 1:
+            self.save_interval = int(self.save_interval * self.training_goal)
+        if self.log_interval < 1 and self.log_interval != -1:
+            self.log_interval = int(self.log_interval * self.training_goal)
+        if self.warmup_period < 1:
+            self.warmup_period = int(self.warmup_period * self.training_goal)
+        if self.lr_decay_period == -1:
+            self.lr_decay_period = self.training_goal
+        elif self.lr_decay_period < 1:
+            self.lr_decay_period = int(self.lr_decay_period * self.training_goal)
+        if self.lr_final_annealing_period is not None:
+            assert self.infinite_lr != -1, "lr_final_annealing_period requires infinite_lr to be set."
+            if self.lr_final_annealing_period < 1:
+                self.lr_final_annealing_period = int(self.lr_final_annealing_period * self.training_goal)
+
         self.training_goal = int(self.training_goal / UNITS_PER_STEP)
         self.eval_interval = int(self.eval_interval / UNITS_PER_STEP)
         self.save_interval = int(self.save_interval / UNITS_PER_STEP)
@@ -202,7 +229,11 @@ class TrainingArgs:
             self.log_interval = int(self.log_interval / UNITS_PER_STEP)
         self.warmup_period = int(self.warmup_period / UNITS_PER_STEP)
         self.lr_decay_period = int(self.lr_decay_period / UNITS_PER_STEP)
+        if self.lr_final_annealing_period is not None:
+            self.lr_final_annealing_period = int(self.lr_final_annealing_period / UNITS_PER_STEP)
 
         if self.preprocessing_workers == -1:
             # Set to all available CPUs, handle SLURM case when only some CPUs are available to the job
             self.preprocessing_workers = int(os.environ.get("SLURM_JOB_CPUS_PER_NODE", multiprocessing.cpu_count()))
+
+        assert self.eval_samples == -1 or self.eval_samples % (self.eval_micro_batch_size * self.num_devices) == 0

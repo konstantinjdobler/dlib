@@ -2,18 +2,21 @@
 Adapted from lit-gpt by Konstantin Dobler.
 """
 
-
 from collections import deque
 from contextlib import nullcontext
 from typing import Any, Callable, Deque, Dict, Optional
 
 import torch
+import transformers
+import transformers.models
 from lightning import Fabric
+from lightning.fabric.accelerators.xla import _XLA_GREATER_EQUAL_2_1
 from lightning.fabric.utilities.rank_zero import rank_zero_only as fabric_rank_zero_only
 from torch import nn
 from torch.utils.flop_counter import FlopCounterMode
+from transformers import LlamaForCausalLM
 
-from .pytorch import num_parameters
+from .utils import num_parameters
 
 GPU_AVAILABLE_FLOPS = {
     # source: https://resources.nvidia.com/en-us-tensor-core/nvidia-tensor-core-gpu-datasheet
@@ -151,8 +154,6 @@ def get_flops_available(device: torch.device, precision: str) -> Optional[float]
                     "MFU cannot be calculated and reported."
                 )
     elif device.type == "xla":
-        from lightning.fabric.accelerators.xla import _XLA_GREATER_EQUAL_2_1
-
         if _XLA_GREATER_EQUAL_2_1:
             from torch_xla._internal import tpu
         else:
@@ -181,6 +182,7 @@ class SpeedMonitor:
         model_flops_fwd_bwd: float | None,
         log_dict: Callable[[Dict, int], None],
         window_size: int = 100,
+        step: int = -1,
     ):
         self.hardware_flops_per_sec_promised = flops_available
         self.model_flops_fwd_bwd = model_flops_fwd_bwd
@@ -197,7 +199,7 @@ class SpeedMonitor:
         # Keep track of toal times
         self.total_eval_time_elapsed = 0.0
         self.total_train_time_elapsed = 0.0
-        self.step = -1
+        self.step = step
 
     def on_train_batch_end(
         self,
@@ -331,7 +333,7 @@ class SpeedMonitorFabric(SpeedMonitor):
 ######################################
 
 
-def estimate_flops(model: nn.Module, block_size: int, num_layers: int, hidden_size: int) -> int:
+def estimate_flops(model: nn.Module, block_size: int, num_layers: int, hidden_size: int, training: bool = True) -> int:
     """Measures estimated FLOPs for MFU, for Transformer models.
 
     Refs:
@@ -345,11 +347,11 @@ def estimate_flops(model: nn.Module, block_size: int, num_layers: int, hidden_si
     n_trainable_params = num_parameters(model, requires_grad=True)
     trainable_flops = flops_per_param(block_size, num_layers, hidden_size, n_trainable_params)
     # forward + backward + gradients (assumes no gradient accumulation)
-    ops_per_step = 3 if model.training else 1
+    ops_per_step = 3 if training else 1
     n_frozen_params = num_parameters(model, requires_grad=False)
     frozen_flops = flops_per_param(block_size, num_layers, hidden_size, n_frozen_params)
     # forward + backward
-    frozen_ops_per_step = 2 if model.training else 1
+    frozen_ops_per_step = 2 if training else 1
     return ops_per_step * trainable_flops + frozen_ops_per_step * frozen_flops
 
 
@@ -369,19 +371,40 @@ def measure_flops(model: nn.Module, x: torch.Tensor) -> int:
     with ctx, flop_counter:
         y = model(x)
         if model.training:
-            y.sum().backward()
+            # if getattr(y, "logits", None) is not None:
+            y["logits"].sum().backward()
+            # else:
+            #     y.sum().backward()
+
     return flop_counter.get_total_flops()
 
 
+@torch.no_grad()
+def flopcounting_patched_llama_rope_forward(self, x, position_ids):
+    """LlamaRotaryEmbedding.forward has an autocast block that crashes with meta device."""
+    # x: [bs, num_attention_heads, seq_len, head_size]
+    inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+    position_ids_expanded = position_ids[:, None, :].float()
+    # Force float32 since bfloat16 loses precision on long contexts
+    # See https://github.com/huggingface/transformers/pull/29285
+    device_type = x.device.type
+    device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+    # with torch.autocast(device_type=device_type, enabled=False):
+    freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    cos = emb.cos()
+    sin = emb.sin()
+    return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+
 def measure_model_flops(
-    fabric: Fabric,
     batch_size: int,
     block_size: int,
     new_model_func: Callable,
     model: nn.Module | None = None,
     parameter_lookup: dict[str, tuple[tuple[int], bool]] | None = None,
-    num_layers: int | None = None,
-    hidden_size: int | None = None,
+    num_layers: int | None = None,  # for estimation formula
+    hidden_size: int | None = None,  # for estimation formula
 ) -> tuple[int, int, int]:
     """
     We use either the original model or a parameter_lookup dict to exactly reconstruct the model (shapes, requires_grad).
@@ -398,25 +421,44 @@ def measure_model_flops(
 
     from print_on_steroids import logger as printer
 
-    with torch.device("meta"), fabric.strategy.precision.init_context():
+    with torch.device("meta"):
         new_model = new_model_func()
+        if isinstance(new_model, LlamaForCausalLM):
+            prev_llama_rope_forward = transformers.models.llama.modeling_llama.LlamaRotaryEmbedding.forward
+            transformers.models.llama.modeling_llama.LlamaRotaryEmbedding.forward = flopcounting_patched_llama_rope_forward
 
         for n, p in new_model.named_parameters():
             if model:
                 shape, grad = (model.get_parameter(n).shape, model.get_parameter(n).requires_grad)
             else:
                 shape, grad = parameter_lookup[n]
-            p.data = torch.empty(shape, requires_grad=grad, device=torch.device("meta"))
+            p.data = torch.empty(shape, requires_grad=grad, device=torch.device("meta"), dtype=p.dtype)
+        estimated_flops = None
         if num_layers is not None and hidden_size is not None:
-            estimated_flops = estimate_flops(new_model, block_size, num_layers, hidden_size) * batch_size
+            estimated_flops = estimate_flops(new_model, block_size, num_layers, hidden_size, training=True) * batch_size
             printer.info(f"Estimated TFLOPs: {estimated_flops / 1e12:.2f}")
-        x = torch.randint(10, 42, (batch_size, block_size))
-        new_model.train()
-        forward_backward_flops = measure_flops(new_model, x)
-        new_model.eval()
-        forward_flops = measure_flops(new_model, x)
-        printer.info(f"Measured TFLOPs: {forward_backward_flops  / 1e12:.2f}")
-        printer.info(f"Measured TFLOPs (just forward): {forward_flops  / 1e12:.2f}")
+        try:
+            x = torch.randint(10, 42, (batch_size, block_size))
+            new_model.train()
+            forward_backward_flops = measure_flops(new_model, x)
+            new_model.eval()
+            forward_flops = measure_flops(new_model, x)
+            printer.info(f"Measured TFLOPs: {forward_backward_flops  / 1e12:.2f}")
+            printer.info(f"Measured TFLOPs (just forward): {forward_flops  / 1e12:.2f}")
+        except AssertionError as e:
+            # https://github.com/pytorch/tnt/issues/621
+            # they claim it's fixed but it's not (or we have a different issue)
+            # Affects HF implementation of Mistral but not the lit-gpt version
+            printer.error(f"Encountered AssertionError while measuring FLOPs: {str(e)}")
+            printer.info("Using estimated FLOPs instead, adjusting down by 10% as estimate is usually too high.")
+            # estimate is usually roughly 10% too high, see estimate_flops docstring
+            forward_backward_flops = estimated_flops * 0.9
+            forward_flops = estimate_flops(new_model, block_size, num_layers, hidden_size, training=False) * batch_size * 0.9
+            printer.info(f"Estimated adjusted TFLOPs: {forward_backward_flops  / 1e12:.2f}")
+            printer.info(f"Estimated adjusted TFLOPs (just forward): {forward_flops  / 1e12:.2f}")
 
-    del new_model, x
+            if isinstance(new_model, LlamaForCausalLM):
+                transformers.models.llama.modeling_llama.LlamaRotaryEmbedding.forward = prev_llama_rope_forward
+
+    del new_model
     return forward_backward_flops, forward_flops, estimated_flops

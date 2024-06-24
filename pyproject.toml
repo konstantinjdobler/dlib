@@ -1,11 +1,27 @@
-[tool.black]
-line-length = 128
-target-version = ['py310']
+[project]
+name = "dlib"
+version = "0.1.0"
+description = "Deep learning research utilities."
+authors = [{ name = "Konstantin Dobler", email = "konstantin.dobler@hpi.de" }]
+dependencies = [
+    "torch>=2.3.1",
+    "transformers>=4.41.2",
+    "simple-parsing>=0.1.5",
+    "jsonlines>=4.0.0",
+    "sentencepiece>=0.2.0",
+    "lightning>=2.3.0",
+    "wandb>=0.17.2",
+    "fire>=0.6.0",
+    "tqdm>=4.66.4",
+    "huggingface-hub[hf_transfer,cli]>=0.23.4",
+    "print-on-steroids[exceptions]>=1.2.3",
+    "numpy>=2.0.0",
+    "datasets>=2.20.0",
+]
+readme = "README.md"
+requires-python = ">= 3.10"
 
-[tool.ruff]
-line-length = 128
-target-version = 'py310'
-ignore-init-module-imports = true
-ignore = ['E203', 'E501']
-# E203: See https://github.com/PyCQA/pycodestyle/issues/373
-# E501: Disable line length error
+[tool.rye]
+managed = true
+virtual = true
+dev-dependencies = []
